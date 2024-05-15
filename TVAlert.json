@@ -1,0 +1,13 @@
+{
+    "ticker": "{{ticker}}",
+    "price" : "{{close}}",
+    "alert_type": "dataFeed",
+    "alert_value": {
+        "open": "{{open}}",
+        "high": "{{high}}",
+        "low": "{{low}}",
+        "close": "{{close}}",
+        "time": "{{time}}",
+        "volume": "{{volume}}"
+    }
+}
