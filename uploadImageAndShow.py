@@ -25,13 +25,14 @@ def update_sheet_with_image(sheets_service, cell_address, image_id):
     """Update a Google Sheet cell with an image link."""
     sheet_id = os.getenv('SHEET_ID')  # Retrieve sheet ID from environment variables
     workbook = sheets_service.open_by_key(sheet_id)
-    sheet = workbook.sheet1  # Assuming we're using the first sheet
+    # sheet = workbook.Sheet4  # Assuming we're using the first sheet
+    sheet = workbook.worksheet('Sheet4')
     image_formula = f'=IMAGE("https://drive.google.com/uc?id={image_id}", 1)'
     sheet.update_acell(cell_address, image_formula)
 
 # Use the functions
 drive_service, sheets_service = initialize_google_services()
-image_id = upload_image_to_drive(drive_service, 'path/to/your/image.jpg')  # Specify the correct path
+image_id = upload_image_to_drive(drive_service, 'downloaded_images/20240515_104616.jpg')  # Specify the correct path
 update_sheet_with_image(sheets_service, 'A1', image_id)  # Update this cell address as needed
 
 print("Image uploaded and linked in the sheet successfully.")
