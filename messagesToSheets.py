@@ -11,7 +11,7 @@ scopes = ["https://www.googleapis.com/auth/spreadsheets"]
 creds = Credentials.from_service_account_file("credentials.json", scopes=scopes)
 client = gspread.authorize(creds)
 
-sheet_id = int(os.getenv('SHEET_ID'))
+sheet_id = os.getenv('SHEET_ID')
 workbook = client.open_by_key(sheet_id)
 
 values_list = workbook.sheet1.row_values(1)
@@ -31,7 +31,7 @@ with open(csv_file_path, mode='r', encoding='utf-8') as csv_file:
 # Clear existing content in the sheet (optional)
 sheet.clear()
 
-sheet.update('A1', data)
+sheet.update(data, 'A1')
 # Upload CSV data to Google Sheet
 # for row_index, row in enumerate(rows, start=1):
 #     time.sleep(1)

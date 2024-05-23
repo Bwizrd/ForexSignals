@@ -1,0 +1,6 @@
+XAUUSD
+BUY : 2417.0
+
+TP: open 
+
+SL⛔️-2411.0 (70 pips)
