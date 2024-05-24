@@ -77,6 +77,9 @@ import csv
 from datetime import datetime, timedelta, timezone
 import re
 
+import gspread
+from google.oauth2.service_account import Credentials
+
 # Load environment variables from .env file
 load_dotenv()
 
@@ -84,9 +87,65 @@ load_dotenv()
 api_id = int(os.getenv('API_ID'))
 api_hash = os.getenv('API_HASH')
 channel_ids = os.getenv('CHANNEL_IDS').split(',')  # Assuming CHANNEL_IDS is comma-separated
-
+sheet_id = os.getenv('SHEET_ID')
 # Initialize the Telegram client
 client = TelegramClient('anon', api_id, api_hash)
+
+def setup_google_sheets():
+    # Load credentials and authorize with the Google Sheets API
+    creds = Credentials.from_service_account_file("credentials.json", scopes=["https://www.googleapis.com/auth/spreadsheets"])
+    gspread_client = gspread.authorize(creds)
+    return gspread_client
+
+# def create_or_open_sheet(gspread_client, sheet_id, sheet_name):
+#     # Open the Google Sheet using the sheet ID
+#     try:
+#         workbook = gspread_client.open_by_key(sheet_id)
+#         sheet = workbook.worksheet(sheet_name)
+#     except gspread.exceptions.WorksheetNotFound:
+#         # If the worksheet is not found, create a new one
+#         sheet = workbook.add_worksheet(title=sheet_name, rows="100", cols="20")
+#     return sheet
+
+def create_or_open_sheet(gspread_client, sheet_id, sheet_name):
+    # Open the Google Sheet using the sheet ID
+    workbook = gspread_client.open_by_key(sheet_id)
+    try:
+        sheet = workbook.worksheet(sheet_name)
+    except gspread.exceptions.WorksheetNotFound:
+        # If the worksheet is not found, create a new one
+        sheet = workbook.add_worksheet(title=sheet_name, rows="100", cols="20")
+        # Define headers for the new sheet
+        headers = ["Message ID", "Date", "Source", "Currency Pair", "Entry Price", "Stop Loss", "Take Profits", "Trade Action"]
+        sheet.append_row(headers)  # Appends the headers to the new sheet
+    else:
+        # Check if the existing sheet is empty and add headers if it is
+        if sheet.row_count == 1:  # Assumes that if there's only one row, it may need headers
+            headers = ["Message ID", "Date", "Source", "Currency Pair", "Entry Price", "Stop Loss", "Take Profits", "Trade Action"]
+            sheet.append_row(headers)
+
+    return sheet
+
+def log_signals_to_sheet(sheet, signals):
+    # Define headers if the sheet is empty
+    if sheet.row_count == 0:
+        headers = ["Message ID", "Date", "Source", "Currency Pair", "Entry Price", "Stop Loss", "Take Profits", "Trade Action"]
+        sheet.append_row(headers)
+
+    # Log each signal to the Google Sheet
+    for signal in signals:
+        row = [
+            signal["Message ID"],
+            signal["Date"],
+            signal["source"],
+            signal["Currency Pair"],
+            signal["Entry Price"],
+            signal["Stop Loss"],
+            str(signal["Take Profits"]),
+            signal["Trade Action"]
+        ]
+        sheet.append_row(row)
+        print(f"Logged data for Message ID {signal['Message ID']}")
 
 def is_trading_signal(text):
     # Exclude messages containing "hit" not followed by "s" or containing "results"
@@ -164,32 +223,15 @@ def find_latest_folder(base_dir):
 
 def read_signals(csv_file):
     signals = []
-    with open(csv_file, mode='r', encoding='utf-8') as file:
-        reader = csv.DictReader(file)
-        for row in reader:
-            signals.append(row)
+    try:
+        with open(csv_file, mode='r', encoding='utf-8') as file:
+            reader = csv.DictReader(file)
+            for row in reader:
+                signals.append(row)
+        print(f"Read {len(signals)} signals from {csv_file}")
+    except Exception as e:
+        print(f"Failed to read from {csv_file}: {str(e)}")
     return signals
-
-# working for The Charting Society | Free Forex Signal Group
-# def parse_signal(signal):
-#     text = signal['Text']
-#     # Adjusted regex to account for "TP: open" and detailed stop loss information
-#     pattern = re.compile(
-#         r"(?P<currency_pair>XAUUSD)\s+(BUY|SELL)\s+:\s*(?P<entry>\d+\.\d+)\s+"  # Captures "XAUUSD BUY : 2412.0"
-#         r"TP:\s*(?P<tp>open)\s+"  # Captures "TP: open"
-#         r"SL⛔️-\s*(?P<sl>\d+\.\d+)\s*\((?P<pips>\d+\s*pips)\)",  # Captures "SL⛔️-2405.0 (70 pips)"
-#         re.IGNORECASE
-#     )
-#     match = pattern.search(text)
-#     if match:
-#         return {
-#             **signal,
-#             **match.groupdict(),
-#             "Type": os.path.basename(os.path.dirname(csv_file))  # Using the directory name for the Type field
-#         }
-#     else:
-#         print(f"No match found for: {text}")
-#     return None
 
 def get_currency_pair(text):
     # List of currency pairs
@@ -206,14 +248,27 @@ def get_currency_pair(text):
             return pair
     return None  # Return None if no currency pair is found
 
-def get_trade_action(text):
-    # Convert text to upper case to standardize for comparison
-    text = text.upper()
-    if "BUY" in text:
+def get_trade_action(text, entry, sl):
+    # Check if the trade action is explicitly mentioned
+    text_upper = text.upper()
+    if "BUY" in text_upper:
         return "BUY"
-    elif "SELL" in text:
+    elif "SELL" in text_upper:
         return "SELL"
-    return None  # Return None if neither BUY nor SELL is found
+    
+    # Deduce action based on the numeric values of entry and stop loss
+    try:
+        entry = float(entry)
+        sl = float(sl)
+        if sl < entry:
+            return "BUY"
+        elif sl > entry:
+            return "SELL"
+    except ValueError:
+        # If there's an error in converting strings to floats, we cannot deduce the action
+        return None
+
+    return None  # Return None if action cannot be deduced
 
 def get_stop_loss(text):
     # Normalize the text to make regex matching easier
@@ -234,54 +289,123 @@ def get_stop_loss(text):
     return None  # Return None if no SL is found
 
 def get_take_profits(text):
-    # Normalize the text for consistent processing
-    text = text.upper()  # Convert text to upper case to handle case insensitivity
+    text = text.upper()  # Convert text to upper case for case insensitivity
 
-    # Dictionary to store the TP values
-    tp_values = {}
-
-    # Regex to find TP patterns
-    # This pattern looks for TP followed by an optional number (1, 2, or 3) and captures the following numeric value
-    # Additionally checks for "TARGET" as an alias for TP
+    # Regex to find TP patterns including "TARGET" as a TP
     tp_patterns = {
         'TP1': r"TP1\s*[:-]?\s*(-?\d*\.?\d+)",
         'TP2': r"TP2\s*[:-]?\s*(-?\d*\.?\d+)",
         'TP3': r"TP3\s*[:-]?\s*(-?\d*\.?\d+)",
-        'TP': r"TP\s*[:-]?\s*(-?\d*\.?\d+)",  # Generic TP without a number, used if the specifics aren't mentioned
-        'TARGET': r"TARGET\s*[:-]?\s*(-?\d*\.?\d+)"  # Capturing TARGET as it is used for TP in some signals
+        'TP': r"\bTP\b\s*[:-]?\s*(-?\d*\.?\d+)",  # Ensuring it's a standalone TP
+        'TARGET': r"TARGET\s*[:-]?\s*(-?\d*\.?\d+)"
     }
 
-    # Try to find each TP and add to the dictionary if found
+    tp_values = {}
+
+    # Search for each TP in the text and add if found
     for tp, pattern in tp_patterns.items():
         match = re.search(pattern, text)
         if match:
             tp_value = match.group(1)
-            # Ensure the captured value starts with a '0' if it begins with a decimal point for proper numeric interpretation
-            if tp_value.startswith('.'):
+            if tp_value.startswith('.'):  # Handle values that start with a decimal
                 tp_value = '0' + tp_value
             tp_values[tp] = tp_value
 
+    # Remove the generic 'TP' if specific TP1, TP2, or TP3 are found
+    if any(key in tp_values for key in ['TP1', 'TP2', 'TP3']):
+        tp_values.pop('TP', None)  # Remove 'TP' if specific TPs are present
+
     return tp_values if tp_values else None
+
+def get_entry_price(text):
+    matches = re.findall(r'\d*\.\d+|\d+', text)
+    if matches:
+        entry_price = matches[0]
+        # Handle cases where the number starts with a dot (like ".9127")
+        if entry_price.startswith('.'):
+            entry_price = '0' + entry_price
+        return entry_price
+    return None
+
+
+def process_signals(base_dir):
+    directories = [d for d in os.listdir(base_dir) if os.path.isdir(os.path.join(base_dir, d))]
+    all_signals = []
+
+    for directory in directories:
+        short_source = ' '.join(directory.split()[:3])
+        full_dir_path = os.path.join(base_dir, directory)
+        latest_folder = find_latest_folder(full_dir_path)
+        
+        if latest_folder:
+            csv_file = os.path.join(latest_folder, "trading_signals.csv")
+        
+            if os.path.exists(csv_file):
+                signals = read_signals(csv_file)
+                for signal in signals:
+                    processed_signal = {
+                        "source": short_source,
+                        "Message ID": signal["Message ID"],
+                        "Date": signal["Date"],
+                        "Text": signal["Text"],
+                        "Currency Pair": get_currency_pair(signal["Text"]),
+                        "Entry Price": get_entry_price(signal["Text"]),
+                        "Stop Loss": get_stop_loss(signal["Text"]),
+                        "Take Profits": get_take_profits(signal["Text"]),
+                        "Trade Action": get_trade_action(signal["Text"], 
+                                                         get_entry_price(signal["Text"]), 
+                                                         get_stop_loss(signal["Text"]))
+                    }
+                    all_signals.append(processed_signal)
+        else:
+            print(f"No latest folder found in: {full_dir_path}")
+
+    return all_signals
+
+def save_signals(signals, save_path):
+    keys = signals[0].keys()
+    with open(save_path, 'w', newline='') as output_file:
+        dict_writer = csv.DictWriter(output_file, keys)
+        dict_writer.writeheader()
+        dict_writer.writerows(signals)
 
 if __name__ == "__main__":
     # asyncio.run(fetch_and_save_signals()) # Switch off if signals already available
     # base_dir = 'MessageData/Backdated_Data/FOREX SIGNALS GROUP Winning Strategies and Hot Picks!'  # Adjust path as necessary
-    # base_dir = 'MessageData/Backdated_Data/The Charting Society | Free Forex Signal Group'  # Adjust path as necessary
-    base_dir = 'MessageData/Backdated_Data/Trading Pit Signals ️💎'  # Adjust path as necessary
-    latest_folder = find_latest_folder(base_dir)
-    print("Latest folder:", latest_folder)
-    # Assuming latest_folder is identified
-    csv_file = os.path.join(latest_folder, 'trading_signals.csv')
-    signals = read_signals(csv_file)
-    parsed_signals = []
-    for signal in signals:
-        print("Signal", signal)
-        currency_pair = get_currency_pair(signal["Text"])
-        print("Currency Pair:", currency_pair)
-        action = get_trade_action(signal["Text"])
-        print("Trade Action:", action)
-        sl = get_stop_loss(signal["Text"])
-        print(f"Stop Loss: {sl}")
-        tps = get_take_profits(signal["Text"])
-        print(f"Take Profits: {tps}")
+    # # base_dir = 'MessageData/Backdated_Data/The Charting Society | Free Forex Signal Group'  # Adjust path as necessary
+    # # base_dir = 'MessageData/Backdated_Data/Trading Pit Signals ️💎'  # Adjust path as necessary
+    # latest_folder = find_latest_folder(base_dir)
+    # print("Latest folder:", latest_folder)
+    # # Assuming latest_folder is identified
+    # csv_file = os.path.join(latest_folder, 'trading_signals.csv')
+    # signals = read_signals(csv_file)
+    # for signal in signals:
+    #     print("Signal", signal)
+    #     currency_pair = get_currency_pair(signal["Text"])
+    #     print("Currency Pair:", currency_pair)
+    #     sl = get_stop_loss(signal["Text"])
+    #     print(f"Stop Loss: {sl}")
+    #     tps = get_take_profits(signal["Text"])
+    #     print(f"Take Profits: {tps}")
+    #     entry = get_entry_price(signal["Text"])
+    #     print(f"Entry Price: {entry}")
+    #     action = get_trade_action(signal["Text"], entry, sl)
+    #     print("Trade Action:", action)
+    base_dir = 'MessageData/Backdated_Data'
+    signals = process_signals(base_dir)
+    # print("Signals", signals)
+    # Save signals to a CSV file
+    today_date_str = datetime.now().strftime('%Y-%m-%d')
+    base_save = 'MessageData/ProcessedBackDated'
+    save_dir = os.path.join(base_dir, today_date_str)
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
+    save_path = os.path.join(base_save, "today's_signals.csv")
+    save_signals(signals, save_path)
 
+    print(f"Signals have been saved to {save_path}")
+    TODAY_DATE = datetime.now().strftime('%Y-%m-%d')
+    SHEET_NAME = f"BackDated_{TODAY_DATE}"  # Dynamic sheet name based on the date
+    gspread_client = setup_google_sheets()
+    sheet = create_or_open_sheet(gspread_client, sheet_id, SHEET_NAME)
+    log_signals_to_sheet(sheet, signals)
